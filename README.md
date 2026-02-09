@@ -14,6 +14,7 @@
   <a href="TeamsVolume.swift"><img src="https://img.shields.io/badge/swift-5.9+-orange?logo=swift&logoColor=white" alt="Swift 5.9+"></a>
   <a href="TeamsVolume.swift"><img src="https://img.shields.io/badge/size-100_KB-brightgreen" alt="100 KB"></a>
   <a href="#installation"><img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies"></a>
+  <a href="#install-with-homebrew"><img src="https://img.shields.io/badge/homebrew-available-orange?logo=homebrew&logoColor=white" alt="Homebrew"></a>
 </p>
 
 <p align="center">
@@ -61,6 +62,14 @@ macOS has **no built-in per-app volume control**. When Microsoft Teams blasts no
 When you quit TeamsVolume, the tap is destroyed and Teams audio returns to normal.
 
 ## Installation
+
+### Install with Homebrew
+
+```bash
+brew tap bahmetpalanci/tap
+brew install teams-volume
+open $(brew --prefix)/opt/teams-volume/TeamsVolume.app
+```
 
 ### Install from Source
 
