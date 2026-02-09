@@ -14,7 +14,6 @@
   <a href="TeamsVolume.swift"><img src="https://img.shields.io/badge/swift-5.9+-orange?logo=swift&logoColor=white" alt="Swift 5.9+"></a>
   <a href="TeamsVolume.swift"><img src="https://img.shields.io/badge/size-100_KB-brightgreen" alt="100 KB"></a>
   <a href="#installation"><img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies"></a>
-  <a href="#install-with-homebrew"><img src="https://img.shields.io/badge/homebrew-available-orange?logo=homebrew&logoColor=white" alt="Homebrew"></a>
 </p>
 
 <p align="center">
@@ -63,21 +62,6 @@ When you quit TeamsVolume, the tap is destroyed and Teams audio returns to norma
 
 ## Installation
 
-### Install with Homebrew
-
-The easiest way to install TeamsVolume:
-
-```bash
-brew tap bahmetpalanci/tap
-brew install teams-volume
-```
-
-Then run:
-
-```bash
-open $(brew --prefix)/opt/teams-volume/TeamsVolume.app
-```
-
 ### Install from Source
 
 ```bash
@@ -96,12 +80,18 @@ bash install.sh
 ### Uninstall
 
 ```bash
-# If installed with Homebrew
-brew uninstall teams-volume
-
-# If installed from source
 bash uninstall.sh
 ```
+
+### First Launch — Screen Recording Permission
+
+On first launch, macOS will ask for **Screen & System Audio Recording** permission. This is required for the Core Audio Tap API to capture app audio.
+
+1. Open **System Settings → Privacy & Security → Screen & System Audio Recording**
+2. Enable **TeamsVolume**
+3. Relaunch the app when prompted
+
+This permission is only asked once.
 
 ### Requirements
 
@@ -124,7 +114,7 @@ bash build.sh
 open TeamsVolume.app
 ```
 
-The entire source code is in [`TeamsVolume.swift`](TeamsVolume.swift) — a single file, ~280 lines.
+The entire source code is in [`TeamsVolume.swift`](TeamsVolume.swift) — a single file, ~560 lines.
 
 ## Project Structure
 
@@ -134,9 +124,10 @@ teams-volume/
 ├── build.sh                   # Build script
 ├── install.sh                 # Install as login item
 ├── uninstall.sh               # Remove login item
-├── TeamsVolume.app/           # Compiled app bundle
+├── TeamsVolume.app/           # App bundle
 │   └── Contents/
 │       ├── Info.plist
+│       ├── Resources/AppIcon.icns
 │       └── MacOS/TeamsVolume
 ├── assets/                    # Logo and screenshots
 └── README.md
@@ -175,7 +166,7 @@ The Core Audio Tap API (<code>CATapDescription</code>, <code>AudioHardwareCreate
 
 <details>
 <summary><strong>Does it need special permissions?</strong></summary>
-No. The Core Audio Tap API works without entitlements for ad-hoc signed apps. No microphone access, no accessibility permissions, no screen recording permissions needed.
+Yes — <strong>Screen & System Audio Recording</strong> permission is required. macOS will prompt you on first launch. This is needed for the Core Audio Tap API to intercept app audio. No microphone access or accessibility permissions are needed.
 </details>
 
 <details>
