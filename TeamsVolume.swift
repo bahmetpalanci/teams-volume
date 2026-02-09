@@ -286,25 +286,30 @@ final class AudioTapEngine {
 // MARK: - Process Finder
 
 func findProcessPID(name: String) -> pid_t? {
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-    task.arguments = ["-f", name]
-    let pipe = Pipe()
-    task.standardOutput = pipe
-    task.standardError = FileHandle.nullDevice
-    try? task.run()
-    task.waitUntilExit()
+    // Try exact match first (MSTeams), then fallback to full match
+    for args in [["-x", name], ["-f", name]] {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        task.arguments = args
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        try? task.run()
+        task.waitUntilExit()
 
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    guard let output = String(data: data, encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines),
-          !output.isEmpty else {
-        return nil
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !output.isEmpty else {
+            continue
+        }
+
+        let firstLine = output.components(separatedBy: "\n").first ?? output
+        if let pid = pid_t(firstLine) {
+            return pid
+        }
     }
-
-    // Take the first PID
-    let firstLine = output.components(separatedBy: "\n").first ?? output
-    return pid_t(firstLine)
+    return nil
 }
 
 // MARK: - Menu Bar App
@@ -348,6 +353,7 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
 
     private func showVolumeMenu() {
         let menu = NSMenu()
+        menu.minimumWidth = 220
 
         // Status line
         let statusText = isConnected
@@ -360,20 +366,20 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // Volume slider
-        let sliderView = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 30))
-
-        let label = NSTextField(labelWithString: "\(volumePercent)%")
-        label.frame = NSRect(x: 165, y: 5, width: 35, height: 20)
-        label.alignment = .right
-        label.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        label.tag = 100
-        sliderView.addSubview(label)
+        let sliderView = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
 
         let slider = NSSlider(value: Double(volumePercent), minValue: 0, maxValue: 100,
                               target: self, action: #selector(sliderChanged(_:)))
-        slider.frame = NSRect(x: 15, y: 5, width: 145, height: 20)
+        slider.frame = NSRect(x: 20, y: 2, width: 140, height: 20)
         slider.isContinuous = true
         sliderView.addSubview(slider)
+
+        let label = NSTextField(labelWithString: "\(volumePercent)%")
+        label.frame = NSRect(x: 166, y: 2, width: 40, height: 20)
+        label.alignment = .left
+        label.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        label.tag = 100
+        sliderView.addSubview(label)
 
         sliderMenuItem = NSMenuItem()
         sliderMenuItem.view = sliderView
@@ -434,8 +440,9 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
             symbolName = "speaker.wave.3.fill"
         }
         let image = NSImage(systemSymbolName: symbolName,
-                            accessibilityDescription: "Volume")
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+                            accessibilityDescription: "TeamsVolume")
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor]))
         button.image = image?.withSymbolConfiguration(config)
     }
 
@@ -450,7 +457,7 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func checkTeamsStatus() {
-        if let pid = findProcessPID(name: "Microsoft Teams") {
+        if let pid = findProcessPID(name: "MSTeams") {
             if !isConnected || pid != currentPID {
                 // Teams found (or restarted), connect tap
                 engine.stop()
