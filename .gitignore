@@ -1,0 +1,14 @@
+# Build artifacts
+TeamsVolume.app/Contents/MacOS/TeamsVolume
+TeamsVolume
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+build/
+DerivedData/

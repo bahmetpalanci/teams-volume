@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#16213e;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4f6df5;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3b51b5;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <rect width="200" height="200" rx="40" fill="url(#bg)"/>
+  <!-- Speaker body -->
+  <polygon points="60,78 60,122 80,122 105,142 105,58 80,78" fill="url(#accent)"/>
+  <!-- Sound waves -->
+  <path d="M 118 72 Q 138 100 118 128" fill="none" stroke="#4f6df5" stroke-width="6" stroke-linecap="round" opacity="0.9"/>
+  <path d="M 130 58 Q 158 100 130 142" fill="none" stroke="#4f6df5" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+  <!-- Volume slider line -->
+  <line x1="45" y1="165" x2="155" y2="165" stroke="#4f6df5" stroke-width="4" stroke-linecap="round" opacity="0.4"/>
+  <circle cx="110" cy="165" r="7" fill="#4f6df5"/>
+</svg>
