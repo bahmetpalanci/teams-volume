@@ -16,5 +16,7 @@
     <true/>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>TeamsVolume needs access to capture audio from Microsoft Teams to control its volume.</string>
 </dict>
 </plist>

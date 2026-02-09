@@ -1,5 +1,6 @@
 # Build artifacts
 TeamsVolume.app/Contents/MacOS/TeamsVolume
+TeamsVolume.app/Contents/_CodeSignature/
 TeamsVolume
 
 # macOS
