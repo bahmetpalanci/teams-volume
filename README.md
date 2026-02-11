@@ -33,7 +33,11 @@ macOS has **no built-in per-app volume control**. When Microsoft Teams blasts no
 - **Lightweight** — ~100 KB binary compiled from a single Swift file. No Electron, no bloat.
 - **Zero dependencies** — Built with native macOS frameworks. Nothing to install except the app itself.
 - **Auto-detect** — Automatically finds Teams when it starts, reconnects if Teams restarts.
-- **Clean audio** — Volume ramping prevents clicks and pops when adjusting.
+- **Device change handling** — Automatically reconnects when you switch audio devices (speakers, headphones, Bluetooth).
+- **Bluetooth optimized** — Uses stacked aggregate mode and native buffer sizes for Bluetooth devices (AirPods, etc.).
+- **Dead tap recovery** — Detects and recovers from broken audio taps automatically.
+- **Auto permission detection** — Detects Screen Recording permission grant without requiring app restart.
+- **Clean audio** — Volume ramping prevents clicks and pops when adjusting. At 100% volume, audio passes through as a zero-copy memcpy.
 - **Privacy-first** — Runs locally, no network access, no analytics, no data collection.
 
 ## How It Works
@@ -160,7 +164,7 @@ No frameworks, no package managers, no build systems. Just `swiftc`.
 
 <details>
 <summary><strong>Does it affect audio quality?</strong></summary>
-No. TeamsVolume applies a simple linear gain to each audio sample. At 100% volume, the audio passes through completely unmodified. There is no resampling, compression, or format conversion.
+No. TeamsVolume applies a simple linear gain to each audio sample. At 100% volume, the audio passes through as a zero-copy memcpy — completely unmodified. There is no resampling, compression, or format conversion. <strong>Note:</strong> When using Bluetooth headsets during a call (mic + speaker), macOS may switch to the lower-quality HFP codec. This is a Bluetooth/macOS limitation, not a TeamsVolume issue.
 </details>
 
 <details>
@@ -184,6 +188,11 @@ TeamsVolume shows "searching..." in the menu and polls every 3 seconds. When Tea
 </details>
 
 <details>
+<summary><strong>What happens when I switch audio devices?</strong></summary>
+TeamsVolume automatically detects output device changes and reconnects the audio tap to the new device. For Bluetooth devices, it waits 3 seconds for the Bluetooth stack to settle before reconnecting.
+</details>
+
+<details>
 <summary><strong>What happens when I quit TeamsVolume?</strong></summary>
 The audio tap is destroyed and Teams audio immediately returns to normal system volume. No residual effects.
 </details>
@@ -200,6 +209,15 @@ The audio tap is destroyed and Teams audio immediately returns to normal system 
 ## See Also
 
 - [MicMute](https://github.com/bahmetpalanci/mic-mute) — One-click microphone mute/unmute for macOS menu bar (same author, same philosophy)
+
+## Disclaimer
+
+- This software is provided **as-is**, without warranty of any kind. Use at your own risk.
+- TeamsVolume is **not affiliated with, endorsed by, or associated with Microsoft Corporation or Apple Inc.**
+- "Microsoft Teams" is a trademark of Microsoft Corporation.
+- TeamsVolume uses macOS Core Audio Tap API, which requires **Screen & System Audio Recording** permission. This permission is needed to intercept app audio — TeamsVolume does **not** record or store any audio data.
+- **Bluetooth audio quality note:** When using Bluetooth headsets (AirPods, etc.) as both microphone and speaker during a call, macOS switches from the high-quality A2DP codec to the lower-quality HFP (Hands-Free Profile) codec. This is a macOS/Bluetooth limitation, not a TeamsVolume issue. Audio may sound lower quality in this mode regardless of TeamsVolume.
+- TeamsVolume does **not** collect, transmit, or store any personal data. It has no network access.
 
 ## Contributing
 

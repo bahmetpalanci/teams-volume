@@ -42,6 +42,10 @@ final class AudioTapEngine {
     /// Ramp coefficient for click-free volume changes
     private var rampCoefficient: Float = 0.0007
 
+    /// Stacked mode: number of device input buffers to skip before tap buffers
+    private var stackedInputOffset: Int = 0
+    private var isStacked: Bool = false
+
     var active: Bool { isActive }
 
     /// Callback count for status display
@@ -84,20 +88,30 @@ final class AudioTapEngine {
         }
         tapID = newTapID
 
-        // Get default output device UID
-        guard let outputDeviceUID = getDefaultOutputDeviceUID() else {
+        // Get default output device info
+        guard let outputDevID = getDefaultOutputDeviceID(),
+              let outputDeviceUID = getDeviceUID(outputDevID) else {
             dlog("ERROR: getDefaultOutputDeviceUID")
             cleanup()
             return false
         }
 
-        // Create aggregate device with tap (non-stacked, AudioCap-style)
+        let outName = getDeviceName(outputDevID)
+        let outTransport = getTransportType(outputDevID)
+        let outRate = readSampleRate(deviceID: outputDevID)
+        dlog("Output device: \(outName) (id=\(outputDevID), transport=\(outTransport), rate=\(outRate ?? 0))")
+
+        // Create aggregate device with tap (stacked mode for better Bluetooth clock sync)
+        let isBT = outTransport == kAudioDeviceTransportTypeBluetooth
+                 || outTransport == kAudioDeviceTransportTypeBluetoothLE
+        dlog("Using stacked=\(isBT) mode")
+
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey: "TeamsVolume-Aggregate",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
             kAudioAggregateDeviceMainSubDeviceKey: outputDeviceUID,
             kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceIsStackedKey: isBT,
             kAudioAggregateDeviceTapAutoStartKey: true,
             kAudioAggregateDeviceSubDeviceListKey: [
                 [kAudioSubDeviceUIDKey: outputDeviceUID]
@@ -126,9 +140,42 @@ final class AudioTapEngine {
             return false
         }
 
+        // Match aggregate sample rate to output device
+        if let targetRate = outRate {
+            let aggRate = readSampleRate(deviceID: aggregateDeviceID)
+            dlog("Aggregate rate=\(aggRate ?? 0), output rate=\(targetRate)")
+            if aggRate != targetRate {
+                dlog("Setting aggregate sample rate to \(targetRate)")
+                setSampleRate(deviceID: aggregateDeviceID, sampleRate: targetRate)
+                CFRunLoopRunInMode(.defaultMode, 0.1, false)
+            }
+        }
+
+        // Match buffer size to output device (never override Bluetooth native size)
+        let outBuf = readBufferFrameSize(deviceID: outputDevID)
+        let aggBuf = readBufferFrameSize(deviceID: aggregateDeviceID)
+        dlog("Buffer sizes: output=\(outBuf), aggregate=\(aggBuf)")
+        if outBuf > 0 && aggBuf != outBuf {
+            dlog("Setting aggregate buffer to \(outBuf) to match output device")
+            setBufferFrameSize(deviceID: aggregateDeviceID, size: outBuf)
+        }
+
+        // Set clock source to the output device for better sync
+        setClockSource(aggregateID: aggregateDeviceID, masterUID: outputDeviceUID)
+
+        // Store stacked mode info for processAudio
+        isStacked = isBT
+        if isBT {
+            stackedInputOffset = countInputChannels(deviceID: outputDevID)
+            dlog("Stacked input offset=\(stackedInputOffset) (device input channels)")
+        } else {
+            stackedInputOffset = 0
+        }
+
         // Compute ramp coefficient from device sample rate
         if let sampleRate = readSampleRate(deviceID: aggregateDeviceID) {
             rampCoefficient = 1 - exp(-1 / (Float(sampleRate) * 0.030))
+            dlog("Final aggregate rate=\(sampleRate), rampCoeff=\(rampCoefficient)")
         }
 
         // Create IO Proc
@@ -204,26 +251,63 @@ final class AudioTapEngine {
 
         callbackCount += 1
 
+        // Log buffer format on first callback
+        if callbackCount == 1 {
+            dlog("IO callback #1: inBufs=\(inputBuffers.count), outBufs=\(outputBuffers.count), stacked=\(isStacked), offset=\(stackedInputOffset)")
+            for i in 0..<inputBuffers.count {
+                let b = inputBuffers[i]
+                dlog("  in[\(i)]: channels=\(b.mNumberChannels), bytes=\(b.mDataByteSize), data=\(b.mData != nil)")
+            }
+            for i in 0..<outputBuffers.count {
+                let b = outputBuffers[i]
+                dlog("  out[\(i)]: channels=\(b.mNumberChannels), bytes=\(b.mDataByteSize), data=\(b.mData != nil)")
+            }
+        }
+
+        // In stacked mode, input buffers are: [device_input..., tap...]
+        // We skip device input buffers and read from tap buffers
+        let inputOffset = isStacked ? stackedInputOffset : 0
+
         for outputIndex in 0..<outputBuffers.count {
             let outputBuffer = outputBuffers[outputIndex]
             guard let outputData = outputBuffer.mData else { continue }
 
-            // Non-stacked: input and output buffers map 1:1
-            guard outputIndex < inputBuffers.count,
-                  let inputData = inputBuffers[outputIndex].mData else {
+            let inputIndex = outputIndex + inputOffset
+            guard inputIndex < inputBuffers.count,
+                  let inputData = inputBuffers[inputIndex].mData else {
                 memset(outputData, 0, Int(outputBuffer.mDataByteSize))
                 continue
             }
 
             let inputSamples = inputData.assumingMemoryBound(to: Float.self)
             let outputSamples = outputData.assumingMemoryBound(to: Float.self)
-            let sampleCount = Int(inputBuffers[outputIndex].mDataByteSize) / MemoryLayout<Float>.size
+            let sampleCount = Int(inputBuffers[inputIndex].mDataByteSize) / MemoryLayout<Float>.size
+            let outSampleCount = Int(outputBuffer.mDataByteSize) / MemoryLayout<Float>.size
+            let count = min(sampleCount, outSampleCount)
 
-            for i in 0..<sampleCount {
-                currentVol += (targetVol - currentVol) * ramp
-                outputSamples[i] = inputSamples[i] * currentVol
-                let absVal = abs(inputSamples[i])
-                if absVal > maxPeak { maxPeak = absVal }
+            // Fast path: volume at 100%, just copy
+            if targetVol >= 0.999 && currentVol >= 0.999 {
+                memcpy(outputData, inputData, count * MemoryLayout<Float>.size)
+                // Zero any remaining output samples
+                if outSampleCount > count {
+                    let remaining = (outSampleCount - count) * MemoryLayout<Float>.size
+                    memset(outputData.advanced(by: count * MemoryLayout<Float>.size), 0, remaining)
+                }
+                for i in 0..<count {
+                    let absVal = abs(inputSamples[i])
+                    if absVal > maxPeak { maxPeak = absVal }
+                }
+            } else {
+                for i in 0..<count {
+                    currentVol += (targetVol - currentVol) * ramp
+                    outputSamples[i] = inputSamples[i] * currentVol
+                    let absVal = abs(inputSamples[i])
+                    if absVal > maxPeak { maxPeak = absVal }
+                }
+                // Zero remaining
+                for i in count..<outSampleCount {
+                    outputSamples[i] = 0
+                }
             }
         }
 
@@ -292,7 +376,7 @@ final class AudioTapEngine {
         return objectID
     }
 
-    private func getDefaultOutputDeviceUID() -> String? {
+    func getDefaultOutputDeviceID() -> AudioObjectID? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -300,23 +384,124 @@ final class AudioTapEngine {
         )
         var deviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
         var size = UInt32(MemoryLayout<AudioObjectID>.size)
-
-        var status = AudioObjectGetPropertyData(
+        let status = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject),
             &address, 0, nil, &size, &deviceID
         )
-        guard status == noErr else { return nil }
+        guard status == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        return deviceID
+    }
 
-        address.mSelector = kAudioDevicePropertyDeviceUID
+    private func getDeviceUID(_ deviceID: AudioObjectID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
         var uid: CFString = "" as CFString
-        size = UInt32(MemoryLayout<CFString>.size)
-
-        status = withUnsafeMutablePointer(to: &uid) { uidPtr in
-            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, uidPtr)
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &uid) { ptr in
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, ptr)
         }
+        return status == noErr ? uid as String : nil
+    }
 
-        guard status == noErr else { return nil }
-        return uid as String
+    private func getDeviceName(_ deviceID: AudioObjectID) -> String {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var name: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &name) { ptr in
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, ptr)
+        }
+        return status == noErr ? name as String : "unknown"
+    }
+
+    func getTransportType(_ deviceID: AudioObjectID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transport)
+        return transport
+    }
+
+    private func setSampleRate(deviceID: AudioObjectID, sampleRate: Float64) {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var rate = sampleRate
+        AudioObjectSetPropertyData(deviceID, &address, 0, nil,
+                                   UInt32(MemoryLayout<Float64>.size), &rate)
+    }
+
+    private func readBufferFrameSize(deviceID: AudioObjectID) -> UInt32 {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyBufferFrameSize,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var bufSize: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &bufSize)
+        return bufSize
+    }
+
+    private func setBufferFrameSize(deviceID: AudioObjectID, size bufFrames: UInt32) {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyBufferFrameSize,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var val = bufFrames
+        let status = AudioObjectSetPropertyData(deviceID, &address, 0, nil,
+                                                UInt32(MemoryLayout<UInt32>.size), &val)
+        dlog("setBufferFrameSize(\(bufFrames)): \(status == noErr ? "OK" : "ERR \(status)")")
+    }
+
+    private func countInputChannels(deviceID: AudioObjectID) -> Int {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamConfiguration,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr,
+              size > 0 else { return 0 }
+        let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: Int(size))
+        defer { bufferList.deallocate() }
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, bufferList) == noErr else {
+            return 0
+        }
+        let abl = UnsafeMutableAudioBufferListPointer(bufferList)
+        return abl.reduce(0) { $0 + Int($1.mNumberChannels) }
+    }
+
+    private func setClockSource(aggregateID: AudioObjectID, masterUID: String) {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyMainSubDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uid: CFString = masterUID as CFString
+        let status = withUnsafePointer(to: &uid) { ptr in
+            AudioObjectSetPropertyData(aggregateID, &address, 0, nil,
+                                       UInt32(MemoryLayout<CFString>.size), UnsafeMutableRawPointer(mutating: ptr))
+        }
+        dlog("setClockSource(\(masterUID)): \(status == noErr ? "OK" : "ERR \(status)")")
+    }
+
+    private func getDefaultOutputDeviceUID() -> String? {
+        guard let devID = getDefaultOutputDeviceID() else { return nil }
+        return getDeviceUID(devID)
     }
 
     deinit {
@@ -362,6 +547,10 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
     private var currentPID: pid_t = 0
     private var volumePercent: Int = 100
     private var permissionGranted = false
+    private var outputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+    private var isReconnecting = false
+
+    private var permissionCheckTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         dlog("=== TeamsVolume launched ===")
@@ -369,14 +558,26 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
         permissionGranted = AudioTapEngine.hasPermission
         dlog("Permission: \(permissionGranted)")
 
-        if !permissionGranted {
-            AudioTapEngine.requestPermission()
-        }
-
         setupMenuBar()
 
         if permissionGranted {
             startPolling()
+            registerOutputDeviceChangeListener()
+        } else {
+            AudioTapEngine.requestPermission()
+            // Poll for permission grant (user may grant in System Settings)
+            permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+                guard let self = self else { timer.invalidate(); return }
+                if AudioTapEngine.hasPermission {
+                    timer.invalidate()
+                    self.permissionCheckTimer = nil
+                    self.permissionGranted = true
+                    dlog("Permission granted!")
+                    self.startPolling()
+                    self.registerOutputDeviceChangeListener()
+                    self.updateIcon()
+                }
+            }
         }
     }
 
@@ -393,6 +594,19 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         engine.stop()
+        if let block = outputDeviceListenerBlock {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                DispatchQueue.main,
+                block
+            )
+        }
     }
 
     @objc private func statusItemClicked() {
@@ -517,6 +731,66 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
         button.image = image?.withSymbolConfiguration(config)
     }
 
+    // MARK: - Audio Device Change Handling
+
+    private func registerOutputDeviceChangeListener() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        outputDeviceListenerBlock = { [weak self] (_, _) in
+            DispatchQueue.main.async {
+                self?.handleOutputDeviceChanged()
+            }
+        }
+
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            DispatchQueue.main,
+            outputDeviceListenerBlock!
+        )
+    }
+
+    private func handleOutputDeviceChanged() {
+        dlog("Output device changed")
+        guard isConnected, currentPID > 0, !isReconnecting else { return }
+        isReconnecting = true
+
+        let pid = currentPID
+        engine.stop()
+        isConnected = false
+
+        // Bluetooth devices need more time to settle their audio stack
+        var delay = 0.5
+        if let devID = engine.getDefaultOutputDeviceID() {
+            let transport = engine.getTransportType(devID)
+            let isBluetooth = transport == kAudioDeviceTransportTypeBluetooth
+                           || transport == kAudioDeviceTransportTypeBluetoothLE
+            if isBluetooth {
+                delay = 3.0
+                dlog("Bluetooth device detected, using \(delay)s delay")
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            self.isReconnecting = false
+
+            if self.engine.start(pid: pid) {
+                self.isConnected = true
+                self.currentPID = pid
+                self.engine.volume = Float(self.volumePercent) / 100.0
+                dlog("Reconnected after device change pid=\(pid)")
+            } else {
+                self.currentPID = 0
+                dlog("Failed to reconnect after device change")
+            }
+        }
+    }
+
     // MARK: - Polling
 
     private func startPolling() {
@@ -526,7 +800,31 @@ class TeamsVolumeDelegate: NSObject, NSApplicationDelegate {
         checkTeamsStatus()
     }
 
+    private var lastLoggedCallbackCount: Int = 0
+
     private func checkTeamsStatus() {
+        guard !isReconnecting else { return }
+
+        // Log audio activity periodically
+        if isConnected {
+            let cc = engine.callbackCount
+            let peak = engine.peakLevel
+            if cc != lastLoggedCallbackCount {
+                dlog("Audio status: callbacks=\(cc), peak=\(peak), active=\(engine.active)")
+                lastLoggedCallbackCount = cc
+            } else if cc == 0 {
+                dlog("WARNING: No IO callbacks yet, active=\(engine.active)")
+            }
+        }
+
+        // Detect dead tap: engine reports inactive but we think we're connected
+        if isConnected && !engine.active {
+            dlog("Dead tap detected, reconnecting...")
+            isConnected = false
+            engine.stop()
+            // Fall through to reconnect below
+        }
+
         if let pid = findProcessPID(name: "MSTeams") {
             if !isConnected || pid != currentPID {
                 engine.stop()
